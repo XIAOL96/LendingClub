@@ -1,0 +1,124 @@
+rm(list = ls())
+# start.time = Sys.time()
+mypackages = c("xgboost", "dplyr", "Matrix", "stringr")
+tmp = setdiff(mypackages, rownames(installed.packages()))
+if(length(tmp) > 0) install.packages(tmp)
+library(xgboost)
+library(dplyr)
+library(Matrix)
+library(stringr)
+
+# Read data
+loan = read.csv("loan_stat542.csv")
+
+# Code loan_status so it only has two levels: Charged Off and Full Paid
+loan$loan_status = ifelse(loan$loan_status == "Default",
+                                    "Charged Off", 
+                                    ifelse(loan$loan_status == 'Charged Off',
+                                           "Charged Off", "Full Paid"))
+loan$loan_status = ifelse(loan$loan_status == "Charged Off", 1, 0)
+
+loan <- loan %>%
+  select(id, loan_amnt, installment, grade, emp_length, annual_inc, loan_status, 
+         dti, open_acc, revol_bal, revol_util, total_acc, home_ownership, 
+         verification_status,purpose, term, 
+         int_rate, fico_range_low, fico_range_high,
+         earliest_cr_line)
+
+# Convert earliest_cr_line to the number of months from Jan 2007
+loan$earliest_cr_line = paste("01", loan$earliest_cr_line, sep = "-")
+loan$earliest_cr_line = as.numeric(dmy("01-Jan-2007") -  dmy(loan$earliest_cr_line)) %/% 30
+  
+# Fill in missing emp_length with its mod
+loan$emp_length[which(is.na(loan$emp_length))] = '10+ years'
+
+loan$emp_length = factor(loan$emp_length,
+                         levels = c('10+ years', '9 years', '8 years', 
+                                    '7 years', '6 years', '5 years', 
+                                    '4 years', '3 years', '2 years', 
+                                    '1 year', '< 1 year'),
+                         labels = c(10,9,8,7,6,5,4,3,2,1,0))
+
+loan$grade = factor(loan$grade,
+                       levels = c('A', 'B', 'C', 'D', 'E', 'F', 'G'),
+                       labels = c(1,2,3,4,5,6,7))
+
+# Manually one hot encode
+# for(level in unique(loan$home_ownership)){
+#   loan[paste("home_ownership", level, sep = "_")] <- ifelse(loan$home_ownership == level, 1, 0)
+# }
+# loan = subset(loan, select = -c(home_ownership) )
+
+
+# for(level in unique(loan$verification_status)){
+#   level = str_replace_all(level, "([[:punct:]])|\\s+", "_")
+#   loan[paste("verification_status", level, sep = "_")] <- ifelse(loan$verification_status == level, 1, 0)
+# }
+# loan = subset(loan, select = -c(verification_status) )
+
+
+# for(level in unique(loan$purpose)){
+#   level = str_replace_all(level, "([[:punct:]])|\\s+", "_")
+#   loan[paste("purpose", level, sep = "_")] <- ifelse(loan$purpose == level, 1, 0)
+# }
+# loan = subset(loan, select = -c(purpose) )
+
+
+# for(level in unique(loan$term)){
+#   level = str_replace_all(level, "([[:punct:]])|\\s+", "_")
+#   loan[paste("term", level, sep = "_")] <- ifelse(loan$term == level, 1, 0)
+# }
+# loan = subset(loan, select = -c(term))
+
+
+# Fill in missing values in dti and revol_util using their median
+
+loan[which(is.na(loan$dti)),'dti'] = median(loan$dti, na.rm = TRUE)
+loan[which(is.na(loan$revol_util)),'revol_util'] = median(loan$revol_util, na.rm = TRUE)
+
+# Read test data
+test_id = read.csv("Project3_test_id.csv")
+
+
+# log-loss function
+
+logLoss = function(y, p){
+  if (length(p) != length(y)){
+    stop('Lengths of prediction and labels do not match.')
+  }
+
+  if (any(p < 0)){
+    stop('Negative probability provided.')
+  }
+
+  p = pmax(pmin(p, 1 - 10^(-15)), 10^(-15))
+  mean(ifelse(y == 1, -log(p), -log(1 - p)))
+ }
+
+
+# Loop
+
+sum = 0
+accu = matrix(0, nrow = 1, ncol = 3)
+set.seed(123)
+for (i in 1:3){
+
+  test = loan[which(loan$id %in% test_id[,i]),] 
+  train = loan[-which(loan$id %in% test_id[,i]),] 
+  
+  # Xgboost
+  formula = loan_status ~.    
+  dtrain = sparse.model.matrix(formula, train[,-1]) 
+  dtest = sparse.model.matrix(formula, test[,-1])
+ 
+  xgbmodel = xgboost(data = dtrain, label = train$loan_status,
+                   max.depth = 6, eta = 0.5, nrounds = 20, 
+                   verbose = 0, objective = "binary:logistic") 
+  
+  test$prob = predict(xgbmodel, newdata = dtest)
+  results = data.frame(id = test_id[,i], prob = test$prob)
+  accu[1,i] = logLoss(y = test$loan_status, p = test$prob)
+  write.table(results,file = paste("mysubmission", i, ".txt", sep = ""), sep = ", ", col.names= T, row.names = F, quote=F)
+
+  sum = sum + logLoss(y = test$loan_status, p = test$prob)
+}
